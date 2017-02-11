@@ -1,0 +1,212 @@
+
+The other day @light_industry turned me onto tmsu, a program that lets you assign tags to files in your file system. Then you can retrieve files by tag, and create a virtual file system that reflects tag structure instead of the hierarchical tree structure that we've been stuck with. 
+
+Hierarchies are for dead trees and chimpanzees. 
+
+** Dependencies
+
+   What I'm doing now will require that tmsu is installed. If what I do is not garbage, then I will refactor things using protocols, and tmsu will just be one particular implementation of the protocol. I'd like to additionally have implementations for pinboard.in, so that I can bring the same techniques to my bookmarks, and for my goodreads account, so that I can do similar analysis of my books.  
+
+** Away from Trees and Toward Sheaves
+   
+I like real trees, the ones that are plants. I'm opposed to fake trees, the ones that are data structures representing hierarchical information. If you have a book made out of a dead tree and you want to file it, then you have to put it in a library and a building in that library and a wing in that building and a floor of that wing and a room on that floor and a case in that room and a shelf in that case. If the book is an algebra book then it goes in the algebra section; if the book is a topology book then it goes in the topology section. So what do you do when it's an algebraic topology book? In a tree structure you're in trouble. But if you can 'tag' a digital book as being about 'algebra' and also being about 'topology,' then you're golden. (I think.)
+
+A tagging structure, or folksonomy, is not a tree. Instead, such a structure is an 'abstract simplicial complex,' or ASC for short. 
+
+Here's where we're headed: a *sheaf* is a structure in which we take a topological space, such as an abstract simplicial complex equipped with the Txxxxx topology, and assign to every open set (or was it point?) another space, and between those spaces we require an appropriate map that 'respects' the topology. This is all a bit abstract, so I'm going to attempt to implement a few sheaves over the files in my file system, using the tmsu ('tag my stuff up') program, which permits you to assign simple tags, or tags with values, to files in an ordinary unix file system. 
+
+Suppose you have a data set that is a collection of items, plus the keywords that you've tagged those items with. Note that if some item $i$ is tagged with the set of keywords { $k$, $l$, $m$ }, then it is certainly tagged with the individual keywords $k$, $l$, or $m$, or any of the pairs of these keywords. This is enough of a requirement that a tagging structure is more restricted than some arbitrary hypergraph, and it is in fact an ASC, the key requirement of which is, if a simplex $s$ is in the ASC, then all the *faces*, or subsets, of $s$, are also in the ASC.
+
+** Ground Set: The vocabulary of keywords
+
+The *ground set* of a simplicial complex is the set of 0-simplices. For us, this is the set of keywords that are used at least once to tag something in our collection of items. 
+   
+#+BEGIN_SRC clojure 
+  
+  (require '[me.raynes.conch :refer [programs]])
+
+  (programs tmsu)
+
+  (def ground-set 
+    (tmsu "tags" {:seq true}))
+
+  (def v ground-set)
+
+#+END_SRC
+
+"Why not go through the SQL interface of the database that tmsu creates?" Uh b/c this was the first thing I thought of. 
+
+** The n-simplexes
+
+(If we're speaking Greek we should say 'n-simplices' but, we're not speaking Greek).)
+
+An subset $S$ of the ground set is a simplex in our tmsu asc iff there is a nonempty set of files tagged with S.
+
+=tmsu files= gets us every file that we've tagged. 
+=tmsu tags f= where f is a file gets us the tags for each file. 
+
+So let's compose those to get the "base sets" for our ASC, that is, every set of keywords that is assigned to some file. Every subset of these base sets will also be an element of the ASC (by the previous argument: if ABC are tags for an item then so are AB, AC, BC, and A, B, C).
+
+#+BEGIN_SRC clojure
+
+  (def fs (tmsu "files" {:seq true}))
+
+  (def data (mapcat #(tmsu "tags" % {:seq true}) fs))
+
+  (def f (comp #(drop 1 %) #(clojure.string/split % #": ")))
+
+  (def base-sets
+    (let [tag-sets (mapcat f data)]
+      (map #(clojure.string/split % #" ") tag-sets)))
+
+#+END_SRC
+
+This sucks and is brittle and has nasty string nonsense in it. You will definitely be going through the SQLite for this later. But, it does work, so we'll use it.
+
+In addition to, the collection of subsets of keywords such that each subset is the tag-set for some file, it is also the case that if a file is tagged with some tag-set, then every subset of that tag-set also tags the file. There is a combinatorial explosion time-bomb-ticking in this region, so we must proceed cautiously. 
+
+I mean, I'm trying to index the files by the tag sets and also the subsets of those tag sets? So then, every subset of the ground set indexes a collection of files. 
+
+#+BEGIN_SRC clojure
+
+(map #(clojure.string/split % #": ") data)
+
+#+END_SRC
+
+yields vectors in which the first component is a string representing a file and the second component is a space-separated string representing the set of tags. So let's, take that, and then work with the subsets function from math.combinatorics.
+
+#+BEGIN_SRC clojure
+
+(require '[clojure.math.combinatorics :refer [subsets]])
+
+(def g (fn [v] [(first v) (remove empty? (subsets (clojure.string/split (second v) #" ")) )]))
+
+(let [data (map #(clojure.string/split % #": ") data)] 
+  (mapcat g data))
+
+#+END_SRC
+
+#+RESULTS:
+: nil#'ascme.core/g("/home/chiral/notes/anansi.org" (("anansi")) "/home/chiral/notes/antifa.org" (("resistance")) "/home/chiral/notes/capital battlesuit.org" (("money")) "/home/chiral/notes/cryptocurrency.org" (("btc") ("money") ("btc" "money")))
+
+That looks a bit better: filenames mapped to the set of subsets of their tags. Might want to reverse that map, mind.
+
+** From ASCs to sheaves
+
+   > The sheaf of Xs over Y.
+
+   A sheaf consists of an assignation of spaces to the points of a topological space, such that there are maps between the spaces in a manner consistent with the topological structure.^[Technically, for a while we'll be making presheaves, and not caring about the additional property we'd need to verify to see if it's a sheaf. But the property won't become important until a later point in the construction so I'm not going to sweat the difference.]
+
+   Let C be the collection of subsets S of the ground set V such that S is a set tagging some item i in our collection I of items. What we're going to do is, form a category, where the objects are the sets in C and all of their subsets, and the morphisms are the inclusion maps turned backwards. 
+
+   In the last section we got a set of tuples where the first component is the name of a file and the second is the tag-sets that tag that file. Instead we want the map from sets of tags to sets of files. 
+
+** The stalks
+
+   What if we thought of the stalks as the image of a stalk function? We could have the 'item stalk' as identity, but then other stalks as different transformations of the items. 
+
+*** Stalk functions
+
+    The sheaf of item sets over the keywords ASC (kASC for short).
+
+    tmsu files t
+
+    The sheaf of text files over the kASC.
+
+    ->> tmsu files t
+    filter mimetype "text", or maybe filter file-extension "org"
+
+    The sheaf of word counts over the kASC.
+
+    ->> tmsu files t
+    filter mimetype "text", or maybe filter file-extension "org"
+    map wc
+
+The sheaf of modification (creation) times over the kASC.
+    ->> tmsu files t
+    filter mimetype "text", or maybe filter file-extension "org"
+    map getCreationTime / getModifiedTime
+
+(I don't think that one's going to be all that well-defined tbh. I guess it's the set of modification times, which I don't expect to do us any good. But you never know).)
+
+A function that, given a set of keywords, get the set of files. 
+A function that, given a set of keywords, gets the count of the set of files.
+A function that makes a map indexed by the sets of keywords, where the values are...
+- the files tagged thusly
+- the count of the files tagged thusly
+- the timestamps of the files tagged thusly
+
+The sheaf of files (over the ASC).
+The sheaf of file counts.
+The sheaf of only text files.
+The sheaf of only programs (directories containing a src directory).
+The sheaf of word counts of text files.
+The sheaf of bags-of-words of text files.
+The sheaf of last-modified or created times.
+
+** The maps; global and local sections
+
+   The file set presheaf ought to be a sheaf by the obvious inclusion maps. The word count presheaf, that probably becomes a sheaf under some appropriately chosen sum function. I don't know what we'll find in other sheaves. Maybe there will be a nice structure in the bag-of-words sheaf?
+
+Anyway, once you've got some real presheaves defined, I expect that we'll be able to do some global and local section shenanigans. That is, if you take some choice of point in each stalk, and it does or does not follow some consistency rules for maps between stalks, that means something. Something I don't remember right now. You have functions to write, go on. 
+
+** Future 
+*** Using protocols
+
+ Remember when I said, 
+
+ > An subset S of the ground set is a simplex in our tmsu asc iff there is a nonempty set of files tagged with S.
+
+ So you could define the tmsu-asc of keywords and files. But you could also define the pinboard-asc of keywords and pinboard cards or the URLs they point to.
+
+ I don't want to overabstract prematurely, though. Parameterize over data sources later.
+*** New Complexes
+
+ Bringing in additional data sources: 
+
+ The sheaf of sets of bookmarks
+ The sheaf of only the URLs.
+ The sheaf of only tweets.
+ The sheaf of users who tweeted or retweeted a thing (yeah right)
+
+** User Stories
+
+   I was thinking about the user interface to this thing first. Some things the user and/or the system should be able to do. (This is probably garbage but I needed a warmup):
+
+
+Tag a file
+
+Tag a sequence of files
+
+List files from tags
+
+Get tag vocabulary
+
+Get all subsets of the tag vocabulary
+
+Get the subsets that have nonzero sizes of files
+
+Okay now I have to write a bit. 
+
+
+The sequence of descending subsets is 
+all subsets of V
+filtered by
+> (f %) 0 
+where f 
+is open to being chosen later. 
+
+One obvious f is, 
+the suze of the set of files that satisfy the vectof tags with an implicit and. 
+
+You'll want a human interface, for the repl. 
+
+defn tag file tags
+with-program
+"tmsu"
+"tmsu" "tag" file tags
+
+defn items tags
+with-program
+"tmsu"
+"tmsu" "files" tags
