@@ -5,11 +5,13 @@ Hierarchies are for dead trees and chimpanzees.
 
 ** Dependencies
 
-   What I'm doing now will require that tmsu is installed. If what I do is not garbage, then I will refactor things using protocols, and tmsu will just be one particular implementation of the protocol. I'd like to additionally have implementations for pinboard.in, so that I can bring the same techniques to my bookmarks, and for my goodreads account, so that I can do similar analysis of my books.  
+   What I'm doing now will require that tmsu is installed. If what I do is not garbage, then I will refactor things using protocols, and tmsu will just be one particular implementation of the protocol. I'd like to additionally have implementations for pinboard.in, so that I can bring the same techniques to my bookmarks, and my goodreads account, so that I can do similar analysis of my books.  
 
 ** Away from Trees and Toward Sheaves
    
-I like real trees, the ones that are plants. I'm opposed to fake trees, the ones that are data structures representing hierarchical information. If you have a book made out of a dead tree and you want to file it, then you have to put it in a library and a building in that library and a wing in that building and a floor of that wing and a room on that floor and a case in that room and a shelf in that case. If the book is an algebra book then it goes in the algebra section; if the book is a topology book then it goes in the topology section. So what do you do when it's an algebraic topology book? In a tree structure you're in trouble. But if you can 'tag' a digital book as being about 'algebra' and also being about 'topology,' then you're golden. (I think.)
+I like real trees, the ones that are plants. 
+
+I'm opposed to fake trees, the ones that are data structures representing hierarchical information. If you have a book made out of a dead tree and you want to file it, then you have to put it in a library and a building in that library and a wing in that building and a floor of that wing and a room on that floor and a case in that room and a shelf in that case. If the book is an algebra book then it goes in the algebra section; if the book is a topology book then it goes in the topology section. So what do you do when it's an algebraic topology book? In a tree structure you're in trouble. But if you can 'tag' a digital book as being about 'algebra' and also being about 'topology,' then you're golden. 
 
 A tagging structure, or folksonomy, is not a tree. Instead, such a structure is an 'abstract simplicial complex,' or ASC for short. 
 
@@ -32,64 +34,165 @@ The *ground set* of a simplicial complex is the set of 0-simplices. For us, this
 
   (def v ground-set)
 
+  (def labels ground-set)
+
 #+END_SRC
 
 "Why not go through the SQL interface of the database that tmsu creates?" Uh b/c this was the first thing I thought of. 
 
+** Data Set: The list of files
+
+The data that we've labeled. 
+
+#+BEGIN_SRC clojure
+
+(def items (tmsu "files" {:seq true}))
+
+#+END_SRC
+
 ** The n-simplexes
 
-(If we're speaking Greek we should say 'n-simplices' but, we're not speaking Greek).)
+(If we're speaking Greek we should say 'n-simplices' but, we're not speaking Greek, so I write simplexes. Except when I don't.)
 
-An subset $S$ of the ground set is a simplex in our tmsu asc iff there is a nonempty set of files tagged with S.
-
-=tmsu files= gets us every file that we've tagged. 
-=tmsu tags f= where f is a file gets us the tags for each file. 
-
-So let's compose those to get the "base sets" for our ASC, that is, every set of keywords that is assigned to some file. Every subset of these base sets will also be an element of the ASC (by the previous argument: if ABC are tags for an item then so are AB, AC, BC, and A, B, C).
+An subset S of the ground set is a simplex in our tmsu asc iff there is a nonempty set of files tagged with S. But combinatorial explosions prohibit us from checking every subset of the ground set. Instead, we'll get every file's label set, and use that collection as a basis.
 
 #+BEGIN_SRC clojure
 
-  (def fs (tmsu "files" {:seq true}))
+(def base-simplices-by-items
+  (->> items
+       (mapcat (fn [f] (tmsu "tags" f {:seq true})))
+       (map #(clojure.string/split % #": "))
+       (map (juxt first #(clojure.string/split (second %) #" " )))
+       (into {})))
 
-  (def data (mapcat #(tmsu "tags" % {:seq true}) fs))
+(def base-simplices (vals base-simplices-by-items))
 
-  (def f (comp #(drop 1 %) #(clojure.string/split % #": ")))
-
-  (def base-sets
-    (let [tag-sets (mapcat f data)]
-      (map #(clojure.string/split % #" ") tag-sets)))
+(def asc
+  (map set (set (mapcat subsets base-simplices))))
 
 #+END_SRC
 
-This sucks and is brittle and has nasty string nonsense in it. You will definitely be going through the SQLite for this later. But, it does work, so we'll use it.
+I find myself tiptoeing around in fear of combinatorial explosion. Get a grip: no file is going to be labeled with more than 10 tags, really, and 2^10 is about 10^3, which is no big deal to compute. Focus on constructing the ASC and its attachment relation, and your stalk function will call out to tmsu or its db.
 
-In addition to, the collection of subsets of keywords such that each subset is the tag-set for some file, it is also the case that if a file is tagged with some tag-set, then every subset of that tag-set also tags the file. There is a combinatorial explosion time-bomb-ticking in this region, so we must proceed cautiously. 
+** The attachment diagram
 
-I mean, I'm trying to index the files by the tag sets and also the subsets of those tag sets? So then, every subset of the ground set indexes a collection of files. 
+The attachment diagram shows how the simplices fit together. It's the 'transitive reduction' of the inclusion order, also known as the 'covering relation': x and y in our set system S are related iff x is a subset of y, but there is no other set z in S with x < z < y.
+
+Let S be a poset. For x and y in S, y *covers* x iff x < y and there is no element z such that x < z < y.
 
 #+BEGIN_SRC clojure
 
-(map #(clojure.string/split % #": ") data)
+  (defn covers? [S y x]
+    (and (subset? x y)
+         (not (some (fn [z] (and subset? x z) (subset? z y)) S))))
 
 #+END_SRC
 
-yields vectors in which the first component is a string representing a file and the second component is a space-separated string representing the set of tags. So let's, take that, and then work with the subsets function from math.combinatorics.
+Again, I think that I need to not prematurely optimize -- my sets are small. I can go back over this and use matrices if it gets slow.
+
+Alas, to my surprise, this is not a correct implementation of a =covers?= function. To my further surprise, the problem is not that =subset?= is true for improper subsets. Hm....
 
 #+BEGIN_SRC clojure
 
-(require '[clojure.math.combinatorics :refer [subsets]])
+(def set-system #{ #{:x} #{:x :y} #{:x :y :z}})
 
-(def g (fn [v] [(first v) (remove empty? (subsets (clojure.string/split (second v) #" ")) )]))
+(def a #{:x})
 
-(let [data (map #(clojure.string/split % #": ") data)] 
-  (mapcat g data))
+(def b #{:x :y})
+
+(def c #{:x :y :z})
+
+(def expected-attachment-diagram
+  "Note that #{:x} is not directly attached to #{:x :y :z}"
+  #{ [#{:x} #{:x :y}] [#{:x :y} #{:x :y :z}]})
+
+;; Attachment diagram
+;; ==================
+(defn proper-subset? [x y]
+  (and (subset? x y) (not= x y)))
+
+(defn covers? [S x y]
+  (and (proper-subset? x y)
+       (not (some (fn [z] (and (proper-subset? x z) (proper-subset? z y))) S))))
+
+(is (subset? a b))
+
+(is (subset? a c))
+
+(is (proper-subset? a b))
+
+(is (not (proper-subset? b b) ))
+
+(is (covers? set-system b a)) ; FAIL
+
+(not (some (fn [z] (and (proper-subset? b z) (proper-subset? z c))) set-system) )
+
+(covers? set-system c a)
+
+(covers? set-system c b)
+
+;; whyyyyyy
+
+(is (covers? set-system b a))
+
+;; whyyyyyyyyyyyyyyyyyyyyyyyyyyy
+
+(is (not (covers? set-system c a)))
+
+
+
+
+
+
+
 
 #+END_SRC
 
-#+RESULTS:
-: nil#'ascme.core/g("/home/chiral/notes/anansi.org" (("anansi")) "/home/chiral/notes/antifa.org" (("resistance")) "/home/chiral/notes/capital battlesuit.org" (("money")) "/home/chiral/notes/cryptocurrency.org" (("btc") ("money") ("btc" "money")))
+And, here's the beginning of my attempt at defining the attachment diagram, which I stopped working on once I realized that =covers?= isn't working.
 
-That looks a bit better: filenames mapped to the set of subsets of their tags. Might want to reverse that map, mind.
+
+#+BEGIN_SRC clojure
+
+;; Let's just have a vector of every edge, and if that's inefficient, fix it later.
+
+(->> (cartesian-product complex complex)
+     (filter #(covers? complex (first %) (second %)))
+     )
+
+#+END_SRC
+
+** Topologizing the attachment diagram
+
+The n-simplices are just the points of a topology. We need also to define open sets. From Robinson's lecture, I'll define the Tarkovsky (or was it someone else with a 'T' name?) topology.
+
+#+BEGIN_SRC clojure
+
+(defn star [x]
+  (filter (partial subset? (if (set? x) x #{ x } )) complex))
+
+#+END_SRC
+
+A couple test cases from my tiny ambient data set...
+
+#+BEGIN_SRC clojure
+
+(star #{"resistance"})
+;=> (#{"resistance"})
+
+(star #{"money"})
+;=> (#{"money"} #{"btc" "money"}
+
+#+END_SRC
+
+
+
+* TO DO
+
+Implement or synthesize the following ramblings...
+
+** Cosheaves?
+
+You know I'm looking at some of Robinson's slides and it may be the case that I've got a cosheaf, because I'm going top-down. I'm not sure. I might not be sure until I figure out which direction extension goes: do things get bigger or smaller? 
 
 ** From ASCs to sheaves
 
@@ -106,6 +209,13 @@ That looks a bit better: filenames mapped to the set of subsets of their tags. M
    What if we thought of the stalks as the image of a stalk function? We could have the 'item stalk' as identity, but then other stalks as different transformations of the items. 
 
 *** Stalk functions
+    
+def stalk-of-files
+def stalk-of-writings
+def stalk-of-word-counts
+def stalk-of-word-vectors
+def stalk-of-bookmarks
+def stalk-of-contacts
 
     The sheaf of item sets over the keywords ASC (kASC for short).
 
